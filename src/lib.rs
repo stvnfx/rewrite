@@ -1,29 +1,12 @@
 use log;
-use std::cell::RefCell;
 
 // --- LOL_HTML IMPORTS (Correct for v1.1.0) ---
-use lol_html::{
-    HtmlRewriter,
-    Settings,
-    element // This is for the element! macro
-};
-use lol_html::html_content::{
-    ContentType
-    // Element (Removed, it was unused)
-};
+use lol_html::{html_content::ContentType, element, HtmlRewriter, Settings};
 // NO ElementContentHandler trait import is needed!
 
 // --- WORKER IMPORTS (These are correct) ---
 use worker::{
-    event,
-    Cache,
-    Context,
-    Env,
-    Fetch,
-    Method,
-    Request,
-    Response,
-    Result
+    event, Cache, Context, Env, Fetch, Method, Request, Response, Result,
 };
 
 // --- Shared Script Constants ---
@@ -43,7 +26,6 @@ const GLOW_COOKIES_INIT_TIMEOUT: &str = r#"<script>
     bannerDescription: 'We use our own and third-party cookies to personalize content and to analyze web traffic. Read more about our <a href="https://mpsh.fra1.cdn.digitaloceanspaces.com/policy/CookiePolicy.html" target="_blank">Cookie Policy</a> and <a href="https://mpsh.fra1.cdn.digitaloceanspaces.com/policy/PrivacyNotice.html" target="_blank">Privacy Policy.</a>'});
     }, 1000);
     </script>"#;
-
 
 // Define the script arrays for each domain
 const MPSHSOFTWARE_SCRIPTS: &[&str] = &[
@@ -94,7 +76,8 @@ pub async fn main(req: Request, _env: Env, ctx: Context) -> Result<Response> {
             return Fetch::Request(req).send().await;
         }
         handle_request(req, ctx).await
-    }.await;
+    }
+    .await;
 
     match result {
         Ok(res) => Ok(res),
@@ -108,14 +91,13 @@ async fn handle_request(req: Request, ctx: Context) -> Result<Response> {
     let url = req.url()?; // Get URL object
     let url_str = url.to_string(); // Get URL as string
 
-    // --- FIX 1: 'match_request' is just 'match' ---
-    if let Some(response) = cache.match(&cache_key).await? {
+    if let Some(response) = cache.get(&cache_key, false).await? {
         log::info!("Cache hit for: {}", url_str);
         return Ok(response);
     }
 
     log::info!("Cache miss for: {}. Fetching and caching.", url_str);
-    let response = Fetch::Request(req.clone()?).send().await?;
+    let mut response = Fetch::Request(req.clone()?).send().await?;
 
     // --- REWRITER LOGIC ---
     let scripts_to_inject: Option<&[&str]> = if url_str.contains("mpshecosystem.com") {
@@ -137,8 +119,8 @@ async fn handle_request(req: Request, ctx: Context) -> Result<Response> {
         None
     };
 
-    let final_response = if let Some(scripts) = scripts_to_inject {
-        let output = RefCell::new(Vec::new());
+    let (body, headers) = if let Some(scripts) = scripts_to_inject {
+        let mut output = Vec::new();
 
         let element_handler = element!("head", |el| {
             for script in scripts {
@@ -153,53 +135,51 @@ async fn handle_request(req: Request, ctx: Context) -> Result<Response> {
                 ..Settings::default()
             },
             |chunk: &[u8]| {
-                output.borrow_mut().extend_from_slice(chunk);
-            }
+                output.extend_from_slice(chunk);
+            },
         );
 
+        let original_headers = response.headers().clone();
         let body_bytes = response.bytes().await?;
 
-        // --- FIX 2: Handle RewritingError ---
-        // We must map the error from lol_html to a worker::Error
-        rewriter.write(&body_bytes)
+        rewriter
+            .write(&body_bytes)
             .map_err(|e| worker::Error::from(e.to_string()))?;
-        rewriter.end()
+        rewriter
+            .end()
             .map_err(|e| worker::Error::from(e.to_string()))?;
 
-        let body = output.into_inner();
-        let mut new_response = Response::from_bytes(body)?;
-
-        // --- FIX 3: headers_mut() doesn't return a Result ---
-        // So we remove the '?' after it.
-        // And clone_from() returns (), so remove the '?' after it too.
-        new_response.headers_mut().clone_from(response.headers());
-        new_response.headers_mut().set("Cache-Control", "s-maxage=10")?; // .set() DOES return Result
-        
-        new_response
+        (output, original_headers)
     } else {
-        let mut new_response = response.cloned()?;
-        // --- FIX 3 (Again): headers_mut() doesn't return a Result ---
-        new_response.headers_mut().set("Cache-Control", "s-maxage=10")?;
-        new_response
+        let headers = response.headers().clone();
+        let body = response.bytes().await?;
+        (body, headers)
     };
 
-    // --- FIX 4 & 5: Handle errors inside wait_until ---
+    let mut response_for_client = Response::from_bytes(body.clone())?;
+    *response_for_client.headers_mut() = headers.clone();
+    response_for_client.headers_mut().set("Cache-Control", "s-maxage=10")?;
+
     ctx.wait_until(async move {
-        // .cloned() returns a Result, so we must handle it
-        match final_response.cloned() {
-            Ok(cloned_response) => {
-                let cache = Cache::default();
-                // 'put_request' is just 'put'
-                match cache.put(&cache_key, cloned_response).await {
-                    Ok(_) => log::info!("Cached response for: {}", url_str),
-                    Err(e) => log::error!("Failed to cache response: {}", e.to_string()),
-                }
-            }
+        let mut response_for_cache = match Response::from_bytes(body) {
+            Ok(res) => res,
             Err(e) => {
-                log::error!("Failed to clone response for caching: {}", e.to_string());
+                log::error!("Failed to create response for caching: {}", e.to_string());
+                return;
             }
+        };
+        *response_for_cache.headers_mut() = headers;
+        if let Err(e) = response_for_cache.headers_mut().set("Cache-Control", "s-maxage=10") {
+            log::error!("Failed to set cache control for caching response: {}", e.to_string());
+            return;
+        }
+
+        let cache = Cache::default();
+        match cache.put(&cache_key, response_for_cache).await {
+            Ok(_) => log::info!("Cached response for: {}", url_str),
+            Err(e) => log::error!("Failed to cache response: {}", e.to_string()),
         }
     });
 
-    Ok(final_response)
+    Ok(response_for_client)
 }
