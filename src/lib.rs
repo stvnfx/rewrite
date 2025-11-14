@@ -64,6 +64,10 @@ const UNIVERSITY_SCRIPTS: &[&str] = &[
     GLOW_COOKIES_INIT,
 ];
 
+const NETWRK13_SCRIPTS: &[&str] = &[
+    r#"<script defer src="https://um.netwrk13.dev/script.js" data-website-id="8533c887-958d-4e02-b3b8-9afac502d1bc"></script>"#
+];
+
 #[event(start)]
 pub fn start() {
     console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
@@ -106,6 +110,9 @@ async fn handle_request(req: Request, ctx: Context) -> Result<Response> {
     } else if url_str.contains("mpshsoftware.com") {
         log::info!("Injecting to mpshsoftware.com");
         Some(MPSHSOFTWARE_SCRIPTS)
+    } else if url_str.contains("netwrk13.dev") {
+        log::info!("Injecting to netwrk13.dev");
+        Some(NETWRK13_SCRIPTS)
     } else if url_str.contains("home.marketplacesuperheroes.com") {
         log::info!("Injecting to marketplacesuperheroes.com");
         Some(HOMEMARKETPLACE_SCRIPTS)
