@@ -127,36 +127,43 @@ async fn handle_request(req: Request, ctx: Context) -> Result<Response> {
     };
 
     let (body, headers) = if let Some(scripts) = scripts_to_inject {
-        let mut output = Vec::new();
+        let content_type = response.headers().get("content-type")?.unwrap_or_default();
+        if content_type.contains("text/html") {
+            let mut output = Vec::new();
 
-        let element_handler = element!("head", |el| {
-            for script in scripts {
-                el.append(script, ContentType::Html);
-            }
-            Ok(())
-        });
+            let element_handler = element!("head", |el| {
+                for script in scripts {
+                    el.append(script, ContentType::Html);
+                }
+                Ok(())
+            });
 
-        let mut rewriter = HtmlRewriter::new(
-            Settings {
-                element_content_handlers: vec![element_handler],
-                ..Settings::default()
-            },
-            |chunk: &[u8]| {
-                output.extend_from_slice(chunk);
-            },
-        );
+            let mut rewriter = HtmlRewriter::new(
+                Settings {
+                    element_content_handlers: vec![element_handler],
+                    ..Settings::default()
+                },
+                |chunk: &[u8]| {
+                    output.extend_from_slice(chunk);
+                },
+            );
 
-        let original_headers = response.headers().clone();
-        let body_bytes = response.bytes().await?;
+            let original_headers = response.headers().clone();
+            let body_bytes = response.bytes().await?;
 
-        rewriter
-            .write(&body_bytes)
-            .map_err(|e| worker::Error::from(e.to_string()))?;
-        rewriter
-            .end()
-            .map_err(|e| worker::Error::from(e.to_string()))?;
+            rewriter
+                .write(&body_bytes)
+                .map_err(|e| worker::Error::from(e.to_string()))?;
+            rewriter
+                .end()
+                .map_err(|e| worker::Error::from(e.to_string()))?;
 
-        (output, original_headers)
+            (output, original_headers)
+        } else {
+            let headers = response.headers().clone();
+            let body = response.bytes().await?;
+            (body, headers)
+        }
     } else {
         let headers = response.headers().clone();
         let body = response.bytes().await?;
